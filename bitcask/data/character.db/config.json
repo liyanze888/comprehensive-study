@@ -1,0 +1,1 @@
+{"db_version":0,"max_datafile_size":1048576,"max_key_size":64,"max_value_size":65536,"sync_writes":false,"auto_recovery":true,"dir_mode":448,"file_mode":384}

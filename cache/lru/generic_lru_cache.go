@@ -20,6 +20,10 @@ import (
 8.内存中储存的map 使用分片进行保存，减少锁的粒度，同时锁也是分段锁
 9. key 和value支持范型
 10.支持批量获取
+11.支持多集缓存
+12.支持fallback，如果cache中不存在则请求fallback函数
+13. fallback 支持多集缓存，如果local cache 不存在，先fallback到远程cache，如果远程cache也不存在，则返回fallback函数
+14. 支持多点fallback，功能同12，和13
 使用golang 实现
 */
 
@@ -288,7 +292,7 @@ func (c *ShardedCache[K, V]) Set(key K, value V, size int64, ttl ...time.Duratio
 }
 
 // Get 获取缓存项
-func (c *ShardedCache[K, V]) Get(key K) (V, error) {
+func (c *ShardedCache[K, V]) Get(key K) (V, bool) {
 	shard := c.getShard(key)
 	shard.mutex.RLock()
 	element, exists := shard.items[key]
@@ -300,13 +304,13 @@ func (c *ShardedCache[K, V]) Get(key K) (V, error) {
 			if err == nil {
 				// 获取成功，设置到缓存
 				c.Set(key, value, 100) // 默认大小，实际应用中应该准确计算
-				return value, nil
+				return value, true
 			}
 			var zero V
-			return zero, err
+			return zero, false
 		}
 		var zero V
-		return zero, fmt.Errorf("key not found: %v", key)
+		return zero, false
 	}
 
 	item := element.Value.(*CacheItem[K, V])
@@ -320,13 +324,13 @@ func (c *ShardedCache[K, V]) Get(key K) (V, error) {
 			if err == nil {
 				// 获取成功，设置到缓存
 				c.Set(key, value, 100) // 默认大小，实际应用中应该准确计算
-				return value, nil
+				return value, true
 			}
 			var zero V
-			return zero, err
+			return zero, false
 		}
 		var zero V
-		return zero, fmt.Errorf("key expired: %v", key)
+		return zero, false
 	}
 	shard.mutex.RUnlock()
 
@@ -338,7 +342,7 @@ func (c *ShardedCache[K, V]) Get(key K) (V, error) {
 	element, exists = shard.items[key]
 	if !exists {
 		var zero V
-		return zero, fmt.Errorf("key not found: %v", key)
+		return zero, false
 	}
 
 	item = element.Value.(*CacheItem[K, V])
@@ -360,7 +364,7 @@ func (c *ShardedCache[K, V]) Get(key K) (V, error) {
 		}
 	}
 
-	return item.Value, nil
+	return item.Value, false
 }
 
 // GetBatch 批量获取缓存项
