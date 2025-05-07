@@ -13,9 +13,12 @@ const (
 type EvictionPolicy int
 
 const (
-	LRU    EvictionPolicy = iota // 最近最少使用
-	LFU                          // 最不常用
-	FIFO                         // 先进先出
-	Random                       // 随机淘汰
-	TTL                          // 仅基于过期时间
+	LRU          EvictionPolicy = iota // 最近最少使用
+	LFU                                // 最不常用
+	FIFO                               // 先进先出。
+	Random                             // 随机淘汰。性能最优
+	TTL                                // 仅基于过期时间
+	TinyLFU                            // 加权窗口TinyLFU
+	DoubleLRULFU                       // 双LRU策略
+	SWTinyLFU                          // 加权窗口TinyLFU策略
 )

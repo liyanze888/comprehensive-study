@@ -45,6 +45,9 @@ type CacheShard[K comparable, V any] struct {
 	capacity      int
 	memoryLimit   int64
 	currentSize   int64
+	tinyLFU       *TinyLFUCounter // TinyLFU计数器
+	doubleLRU     *DoubleLRU[K]   // 双LRU实现
+	wTinyLFU      *WTinyLFU[K]    // 加权窗口TinyLFU实现
 }
 
 // shouldEvict 判断是否需要淘汰
@@ -72,7 +75,6 @@ type Cache[K comparable, V any] struct {
 	peers        []DistributedPeer[K, V] // 分布式节点列表
 	fallbacks    []FallbackLoader[K, V]  // 回调函数列表
 	listeners    []CacheListener[K, V]   // 监听器列表
-	//metrics      *CacheMonitorMetrics    // 缓存指标 考虑可以使用channel 实现
 }
 
 // 创建新的缓存
@@ -98,31 +100,45 @@ func NewCache[K comparable, V any](config CacheConfig) *Cache[K, V] {
 			return sum
 		},
 		config: config,
-		//metrics: &CacheMonitorMetrics{},
 	}
 
 	// 初始化每个分片
 	for i := 0; i < config.ShardCount; i++ {
-		cache.shards[i] = &CacheShard[K, V]{
+		shard := &CacheShard[K, V]{
 			items:       make(map[K]*Item[V]),
-			lruList:     list.New(),
-			lruItems:    make(map[K]*list.Element),
-			lfuHeap:     NewLFUHeap[K](),
-			fifoQueue:   list.New(),
-			fifoItems:   make(map[K]*list.Element),
 			policy:      config.EvictionPolicy,
 			capacity:    config.MaxItems / config.ShardCount,
 			memoryLimit: config.MaxMemory / int64(config.ShardCount),
 		}
 
-		if cache.shards[i].capacity <= 0 {
-			cache.shards[i].capacity = 1000 // 默认每分片1000个项
+		if shard.capacity <= 0 {
+			shard.capacity = 1000 // 默认每分片1000个项
 		}
 
+		// 根据策略初始化相应的数据结构
+		switch config.EvictionPolicy {
+		case LRU:
+			shard.lruList = list.New()
+			shard.lruItems = make(map[K]*list.Element)
+		case LFU:
+			shard.lfuHeap = NewLFUHeap[K]()
+			heap.Init(shard.lfuHeap)
+		case FIFO:
+			shard.fifoQueue = list.New()
+			shard.fifoItems = make(map[K]*list.Element)
+		case TinyLFU:
+			// 初始化TinyLFU计数器，使用分片容量的2倍作为计数器大小
+			shard.tinyLFU = NewTinyLFUCounter(shard.capacity*2, 1000) // 1000次访问后衰减
+		case DoubleLRULFU:
+			// 初始化双LRU，使用分片容量
+			shard.doubleLRU = NewDoubleLRU[K](shard.capacity)
+		case SWTinyLFU:
+			// 初始化加权窗口TinyLFU，使用分片容量作为窗口大小
+			shard.wTinyLFU = NewWTinyLFU[K](shard.capacity)
+		}
 		// 初始化LFU堆
-		heap.Init(cache.shards[i].lfuHeap)
+		cache.shards[i] = shard
 	}
-
 	// 启动定期清理过期项的协程
 	go cache.startCleanup(config.CleanupInterval)
 
@@ -196,14 +212,22 @@ func (c *Cache[K, V]) removeFromDataStructures(shard *CacheShard[K, V], key K) {
 		shard.accessCounter.Remove(key)
 	}
 
+	// 从TinyLFU中移除
+	if shard.tinyLFU != nil {
+		// TinyLFU不需要显式移除，因为它是基于哈希的
+	}
+
+	// 从双LRU中移除
+	if shard.doubleLRU != nil {
+		shard.doubleLRU.Remove(key)
+	}
+
 	// 从布隆过滤器中移除（注意：布隆过滤器不支持删除，这里只是记录）
 	if shard.bloomFilter != nil {
 		// 布隆过滤器不支持删除操作，这里可以记录删除的键
 		shard.deletedKeys[key] = struct{}{}
 	}
 
-	// 更新统计信息
-	//c.metrics.evictions.Add(1)
 	// 触发清理事件
 	if item, ok := shard.items[key]; ok {
 		for _, listener := range shard.listeners {
@@ -248,11 +272,8 @@ func (c *Cache[K, V]) AddFallback(fallback FallbackLoader[K, V]) {
 func (c *Cache[K, V]) Set(key K, value V, ttl time.Duration) {
 	shard := c.getShard(key)
 	shard.mutex.Lock()
-	var deferFunc = func() {}
 	defer func() {
 		shard.mutex.Unlock()
-		// 更新指标
-		deferFunc()
 	}()
 
 	size := EstimateSize(value)
@@ -272,10 +293,6 @@ func (c *Cache[K, V]) Set(key K, value V, ttl time.Duration) {
 	// 检查容量和内存限制
 	if shard.shouldEvict() {
 		c.evictItem(shard, EvictionReasonCapacity)
-		deferFunc = func() {
-			//c.metrics.evictions.Add(1)
-			//c.metrics.memoryUsage.Swap(c.getCurrentMemoryUsage())
-		}
 	}
 
 	// 创建新项
@@ -296,7 +313,7 @@ func (c *Cache[K, V]) Set(key K, value V, ttl time.Duration) {
 		elem := shard.lruList.PushFront(key)
 		shard.lruItems[key] = elem
 	case LFU:
-		heap.Push(shard.lfuHeap, LFUItem[K]{key: key, count: 0})
+		heap.Push(shard.lfuHeap, &LFUItem[K]{key: key, count: 0})
 	case FIFO:
 		elem := shard.fifoQueue.PushBack(key)
 		shard.fifoItems[key] = elem
@@ -304,11 +321,32 @@ func (c *Cache[K, V]) Set(key K, value V, ttl time.Duration) {
 		if shard.ttlHeap == nil {
 			shard.ttlHeap = NewTTLHeap[K]()
 		}
-		heap.Push(shard.ttlHeap, &TTLItem[K]{
-			key:      key,
-			expireAt: expireAt,
-		})
-	default:
+		if !expireAt.IsZero() {
+			heap.Push(shard.ttlHeap, &TTLItem[K]{
+				key:      key,
+				expireAt: expireAt,
+			})
+		}
+	case TinyLFU:
+		if shard.tinyLFU != nil {
+			// 计算key的哈希值并更新TinyLFU计数器
+			hash := c.hashFunc(key)
+			shard.tinyLFU.Increment(hash)
+		}
+	case DoubleLRULFU:
+		if shard.doubleLRU != nil {
+			// 使用双LRU策略
+			shard.doubleLRU.Access(key)
+
+			// 同时更新LFU计数
+			if shard.lfuHeap != nil {
+				heap.Push(shard.lfuHeap, &LFUItem[K]{key: key, count: 0})
+			}
+		}
+	case SWTinyLFU:
+		if shard.wTinyLFU != nil {
+			shard.wTinyLFU.Access(key, 0)
+		}
 	}
 
 	// 同步到分布式节点
@@ -356,18 +394,13 @@ func (c *Cache[K, V]) evictItem(shard *CacheShard[K, V], reason EvictionReason) 
 			found = true
 		}
 	case TTL:
-		// 基于过期时间，淘汰最早过期的
-		var earliestExpiry time.Time
-		for k, item := range shard.items {
-			if !item.expireAt.IsZero() && (earliestExpiry.IsZero() || item.expireAt.Before(earliestExpiry)) {
-				earliestExpiry = item.expireAt
-				keyToEvict = k
-				found = true
-			}
-		}
-
-		// 如果没有过期项，随机选择
-		if !found {
+		// 基于过期时间，使用TTL堆快速找到最早过期的项
+		if shard.ttlHeap != nil && shard.ttlHeap.Len() > 0 {
+			ttlItem := heap.Pop(shard.ttlHeap).(*TTLItem[K])
+			keyToEvict = ttlItem.key
+			found = true
+		} else {
+			// 如果没有TTL堆或堆为空，随机选择一个项
 			keys := make([]K, 0, len(shard.items))
 			for k := range shard.items {
 				keys = append(keys, k)
@@ -376,6 +409,55 @@ func (c *Cache[K, V]) evictItem(shard *CacheShard[K, V], reason EvictionReason) 
 				keyToEvict = keys[rand.Intn(len(keys))]
 				found = true
 			}
+		}
+	case TinyLFU:
+		// 使用TinyLFU策略
+		if shard.tinyLFU != nil {
+			var minFreq uint8 = 255
+			for k := range shard.items {
+				hash := c.hashFunc(k)
+				freq := shard.tinyLFU.Get(hash)
+				if freq < minFreq {
+					minFreq = freq
+					keyToEvict = k
+					found = true
+				}
+			}
+		}
+	case DoubleLRULFU:
+		// 使用双LRU+LFU混合策略
+		if shard.doubleLRU != nil && shard.lfuHeap != nil {
+			// 首先尝试从双LRU中获取候选
+			keyToEvict, found = shard.doubleLRU.GetEvictionCandidate()
+
+			// 如果找到候选，检查其LFU计数
+			if found {
+				// 获取当前项的LFU计数
+				currentCount := 0
+				if index, ok := shard.lfuHeap.indexMap[keyToEvict]; ok {
+					currentCount = shard.lfuHeap.items[index].count
+				}
+
+				// 如果LFU计数较高，尝试找到LFU计数更低的项
+				if currentCount > 1 {
+					// 遍历所有项，找到LFU计数最低的项
+					minCount := currentCount
+					for k := range shard.items {
+						if index, ok := shard.lfuHeap.indexMap[k]; ok {
+							count := shard.lfuHeap.items[index].count
+							if count < minCount {
+								minCount = count
+								keyToEvict = k
+							}
+						}
+					}
+				}
+			}
+		}
+	case SWTinyLFU:
+		// 使用加权窗口TinyLFU策略
+		if shard.wTinyLFU != nil {
+			keyToEvict, found = shard.wTinyLFU.GetEvictionCandidate()
 		}
 	}
 
@@ -427,7 +509,6 @@ func (c *Cache[K, V]) Get(key K) (V, bool) {
 		} else {
 			// 更新访问信息
 			c.updateAccessInfo(shard, key, item)
-
 			// 检查是否需要重置TTL
 			if item.resetInfo != nil {
 				now := time.Now()
@@ -447,19 +528,14 @@ func (c *Cache[K, V]) Get(key K) (V, bool) {
 					}
 				}
 			}
-			//c.metrics.hits.Add(1)
 			value = item.value
 			return value, true
 		}
 	}
 
-	//c.metrics.misses.Add(1)
-
 	// 本地缓存未命中，尝试远程缓存
 	for _, remote := range c.remoteCaches {
 		if remoteValue, ok := remote.Get(key); ok {
-			//c.metrics.remoteHits.Add(1)
-
 			// 将远程值设置到本地缓存
 			if item != nil && !item.expireAt.IsZero() {
 				ttl := time.Until(item.expireAt)
@@ -472,8 +548,6 @@ func (c *Cache[K, V]) Get(key K) (V, bool) {
 		}
 	}
 
-	//c.metrics.remoteMisses.Add(1)
-
 	// 远程缓存也未命中，尝试回调函数
 	for _, fallback := range c.fallbacks {
 		value, err = fallback.Load(key)
@@ -484,7 +558,6 @@ func (c *Cache[K, V]) Get(key K) (V, bool) {
 			for _, remote := range c.remoteCaches {
 				remote.Set(key, value, c.config.DefaultTTL)
 			}
-			//c.metrics.fallbackCalls.Add(1)
 			return value, true
 		}
 	}
@@ -498,9 +571,6 @@ func (c *Cache[K, V]) Delete(key K) {
 	shard.mutex.Lock()
 	defer func() {
 		shard.mutex.Unlock()
-		// 更新指标
-		//c.metrics.evictions.Add(1)
-		//c.metrics.memoryUsage.Swap(c.getCurrentMemoryUsage())
 	}()
 
 	if item, found := shard.items[key]; found {
@@ -531,6 +601,7 @@ func (c *Cache[K, V]) Delete(key K) {
 func (c *Cache[K, V]) updateAccessInfo(shard *CacheShard[K, V], key K, item *Item[V]) {
 	shard.mutex.Lock()
 	defer shard.mutex.Unlock()
+
 	// item 数据更新
 	item.lastAccessed = time.Now()
 	item.accessCount++
@@ -538,15 +609,46 @@ func (c *Cache[K, V]) updateAccessInfo(shard *CacheShard[K, V], key K, item *Ite
 	// 根据淘汰策略更新数据结构
 	switch shard.policy {
 	case LRU:
+		// LRU策略：将访问的项移到链表前端
 		if elem, ok := shard.lruItems[key]; ok {
 			shard.lruList.MoveToFront(elem)
 		}
 	case LFU:
+		// LFU策略：更新访问计数
 		if shard.lfuHeap != nil {
 			shard.lfuHeap.UpdateCount(key, item.accessCount)
 		}
-		// TODO FIFO TTL 是否需要处理
-	default:
+	case FIFO:
+		// FIFO策略：不需要更新访问信息，因为FIFO只关心插入顺序
+	case Random:
+		// Random策略：不需要更新访问信息，因为随机淘汰不依赖访问信息
+	case TTL:
+		// TTL策略：更新过期时间
+		if shard.ttlHeap != nil {
+			shard.ttlHeap.UpdateExpiry(key, item.expireAt)
+		}
+	case TinyLFU:
+		// TinyLFU策略：更新访问频率计数
+		if shard.tinyLFU != nil {
+			hash := c.hashFunc(key)
+			shard.tinyLFU.Increment(hash)
+		}
+	case DoubleLRULFU:
+		// DoubleLRULFU策略：同时更新LRU和LFU信息
+		if shard.doubleLRU != nil {
+			// 更新双LRU访问顺序
+			shard.doubleLRU.Access(key)
+
+			// 同时更新LFU计数
+			if shard.lfuHeap != nil {
+				shard.lfuHeap.UpdateCount(key, item.accessCount)
+			}
+		}
+	case SWTinyLFU:
+		// 加权窗口TinyLFU策略：更新滑动窗口中的访问频率
+		if shard.wTinyLFU != nil {
+			shard.wTinyLFU.Access(key, item.accessCount)
+		}
 	}
 }
 
@@ -624,4 +726,29 @@ func (c *Cache[K, V]) ResetTTL(key K) {
 			shard.ttlHeap.UpdateExpiry(key, newExpireAt)
 		}
 	}
+}
+
+func (c *Cache[K, V]) Refresh(key K) (value V, err error) {
+	for _, fb := range c.fallbacks {
+		value, err = fb.Load(key)
+		if err != nil {
+			return
+		}
+		c.Set(key, value, c.config.DefaultTTL)
+
+		go func() {
+			// 更新remote 缓存
+			for _, remote := range c.remoteCaches {
+				remote.Set(key, value, c.config.DefaultTTL)
+			}
+		}()
+
+		go func() {
+			for _, peer := range c.peers {
+				peer.SyncSet(key, value, c.config.DefaultTTL)
+			}
+		}()
+
+	}
+	return
 }

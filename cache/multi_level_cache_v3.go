@@ -515,7 +515,7 @@ func (c *Cache[K, V]) Set(key K, value V, ttl time.Duration) {
 		elem := shard.lruList.PushFront(key)
 		shard.lruItems[key] = elem
 	case LFU:
-		heap.Push(shard.lfuHeap, LFUItem[K]{key: key, count: 0})
+		heap.Push(shard.lfuHeap, &LFUItem[K]{key: key, count: 0})
 	case FIFO:
 		elem := shard.fifoQueue.PushBack(key)
 		shard.fifoItems[key] = elem
@@ -594,7 +594,7 @@ func (c *Cache[K, V]) SetMulti(items map[K]V, ttl time.Duration) {
 				elem := shard.lruList.PushFront(k)
 				shard.lruItems[k] = elem
 			case LFU:
-				heap.Push(shard.lfuHeap, LFUItem[K]{key: k, count: 0})
+				heap.Push(shard.lfuHeap, &LFUItem[K]{key: k, count: 0})
 			case FIFO:
 				elem := shard.fifoQueue.PushBack(k)
 				shard.fifoItems[k] = elem
@@ -1012,7 +1012,7 @@ type RedisCache[K comparable, V any] struct {
 
 // 创建Redis缓存
 func NewRedisCache[K comparable, V any](
-	// redisClient redis.Client,
+// redisClient redis.Client,
 	marshal func(V) ([]byte, error),
 	unmarshal func([]byte) (V, error),
 ) *RedisCache[K, V] {
@@ -1842,7 +1842,7 @@ func (c *Cache[K, V]) setInternal(shard *CacheShard[K, V], key K, value V, ttl t
 		elem := shard.lruList.PushFront(key)
 		shard.lruItems[key] = elem
 	case LFU:
-		heap.Push(shard.lfuHeap, LFUItem[K]{key: key, count: 0})
+		heap.Push(shard.lfuHeap, &LFUItem[K]{key: key, count: 0})
 	case FIFO:
 		elem := shard.fifoQueue.PushBack(key)
 		shard.fifoItems[key] = elem

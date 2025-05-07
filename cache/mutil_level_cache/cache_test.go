@@ -1,6 +1,7 @@
 package mutil_level_cache
 
 import (
+	"log/slog"
 	"runtime"
 	"sync"
 	"testing"
@@ -47,12 +48,15 @@ func BenchmarkCacheGet(b *testing.B) {
 	})
 }
 
-// 并发安全性测试
-func TestCacheConcurrentAccess(t *testing.T) {
+func testCacheConcurrentAccess(policy EvictionPolicy, t *testing.T) {
+	now := time.Now()
+	defer func() {
+		slog.Info("testCacheConcurrentAccess", slog.Any("policy", policy), slog.Any("cost", time.Since(now)))
+	}()
 	cache := NewCache[string, int](CacheConfig{
 		ShardCount:      32,
 		MaxItems:        10000,
-		EvictionPolicy:  LRU,
+		EvictionPolicy:  policy,
 		DefaultTTL:      5 * time.Minute,
 		CleanupInterval: time.Minute,
 	})
@@ -86,6 +90,21 @@ func TestCacheConcurrentAccess(t *testing.T) {
 	}
 
 	wg.Wait()
+}
+
+// 并发安全性测试
+func TestCacheConcurrentAccess(t *testing.T) {
+	policies := []EvictionPolicy{LRU,
+		LFU,
+		FIFO,
+		Random,
+		TTL,
+		TinyLFU,
+		DoubleLRULFU,
+		SWTinyLFU}
+	for _, p := range policies {
+		testCacheConcurrentAccess(p, t)
+	}
 }
 
 // 内存泄漏测试
