@@ -1,6 +1,9 @@
 package mutil_level_cache
 
 import (
+	"comprehensive-study/cache/safemap"
+	"github.com/bluele/gcache"
+	"github.com/dgraph-io/ristretto/v2"
 	"log/slog"
 	"runtime"
 	"sync"
@@ -48,6 +51,13 @@ func BenchmarkCacheGet(b *testing.B) {
 	})
 }
 
+type TmpCacheListener[K comparable, V any] struct {
+}
+
+func (TmpCacheListener[K, V]) OnEviction(key K, value V, reason EvictionReason) {
+	slog.Info("OnEviction", slog.Any("key", key), slog.Any("value", value), slog.Any("reason", reason))
+}
+
 func testCacheConcurrentAccess(policy EvictionPolicy, t *testing.T) {
 	now := time.Now()
 	defer func() {
@@ -55,12 +65,13 @@ func testCacheConcurrentAccess(policy EvictionPolicy, t *testing.T) {
 	}()
 	cache := NewCache[string, int](CacheConfig{
 		ShardCount:      32,
-		MaxItems:        10000,
+		MaxItems:        100,
 		EvictionPolicy:  policy,
 		DefaultTTL:      5 * time.Minute,
 		CleanupInterval: time.Minute,
 	})
-
+	//var listener TmpCacheListener[string, int]
+	//cache.AddListener(listener)
 	var wg sync.WaitGroup
 	goroutines := 100
 	operations := 100000
@@ -75,6 +86,111 @@ func testCacheConcurrentAccess(policy EvictionPolicy, t *testing.T) {
 
 				// 并发写入
 				cache.Set(key, value, time.Minute)
+
+				// 并发读取
+				if v, found := cache.Get(key); found {
+					if v != value {
+						t.Errorf("并发读取错误: 期望 %d, 得到 %d", value, v)
+					}
+				}
+
+				// 并发删除
+				cache.Delete(key)
+			}
+		}(i)
+	}
+
+	wg.Wait()
+}
+
+func TestGCacheConcurrentAccess(t *testing.T) {
+	cache := gcache.New(200000).
+		LRU().
+		Build()
+	var wg sync.WaitGroup
+	goroutines := 100
+	operations := 100000
+
+	wg.Add(goroutines)
+	for i := 0; i < goroutines; i++ {
+		go func(id int) {
+			defer wg.Done()
+			for j := 0; j < operations; j++ {
+				key := "key" + string(rune(id))
+				value := id*1000 + j
+
+				// 并发写入
+				cache.Set(key, value)
+
+				// 并发读取
+				if v, found := cache.Get(key); found != nil {
+					t.Errorf("并发读取错误: 期望 %d, 得到 %d, %v ", value, v, found)
+				}
+
+				// 并发删除
+				cache.Remove(key)
+			}
+		}(i)
+	}
+
+	wg.Wait()
+}
+func TestRistrettoCacheConcurrentAccess(t *testing.T) {
+	cache, err := ristretto.NewCache(&ristretto.Config[string, int]{
+		NumCounters: 1e7,           // number of keys to track frequency of (10M).
+		MaxCost:     1 << 30,       // maximum cost of cache (1GB).
+		BufferItems: 100000 * 1000, // number of keys per Get buffer.
+	})
+	if err != nil {
+		panic(err)
+	}
+	defer cache.Close()
+	var wg sync.WaitGroup
+	goroutines := 100
+	operations := 100000
+
+	wg.Add(goroutines)
+	for i := 0; i < goroutines; i++ {
+		go func(id int) {
+			defer wg.Done()
+			for j := 0; j < operations; j++ {
+				key := "key" + string(rune(id))
+				value := id*1000 + j
+
+				// 并发写入
+				cache.Set(key, value, 1)
+
+				// 并发读取
+				if v, found := cache.Get(key); found {
+					if v != value {
+						t.Errorf("并发读取错误: 期望 %d, 得到 %d", value, v)
+					}
+				}
+
+				// 并发删除
+				cache.Del(key)
+			}
+		}(i)
+	}
+
+	wg.Wait()
+}
+func TestSafeMapCacheConcurrentAccess(t *testing.T) {
+	cache := safemap.NewSafeMapWithLoader[string, int]()
+	var wg sync.WaitGroup
+	goroutines := 100
+	operations := 100000
+
+	wg.Add(goroutines)
+	for i := 0; i < goroutines; i++ {
+		go func(id int) {
+			defer wg.Done()
+			for j := 0; j < operations; j++ {
+				key := "key" + string(rune(id))
+				value := id*1000 + j
+
+				// 并发写入
+				cache.Set(key, value)
 
 				// 并发读取
 				if v, found := cache.Get(key); found {

@@ -186,9 +186,11 @@ func (c *Cache[K, V]) cleanupExpired() {
 // removeFromDataStructures 从数据结构中移除项
 func (c *Cache[K, V]) removeFromDataStructures(shard *CacheShard[K, V], key K) {
 	// 从LRU链表中移除
-	if elem, ok := shard.lruItems[key]; ok {
-		shard.lruList.Remove(elem)
-		delete(shard.lruItems, key)
+	if shard.lruItems != nil {
+		if elem, ok := shard.lruItems[key]; ok {
+			shard.lruList.Remove(elem)
+			delete(shard.lruItems, key)
+		}
 	}
 
 	// 从FIFO队列中移除
@@ -372,7 +374,7 @@ func (c *Cache[K, V]) evictItem(shard *CacheShard[K, V], reason EvictionReason) 
 	case LFU:
 		// 最不常用
 		if shard.lfuHeap.Len() > 0 {
-			lfuItem := heap.Pop(shard.lfuHeap).(LFUItem[K])
+			lfuItem := heap.Pop(shard.lfuHeap).(*LFUItem[K])
 			keyToEvict = lfuItem.key
 			found = true
 		}

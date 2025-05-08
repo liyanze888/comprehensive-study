@@ -1012,7 +1012,7 @@ type RedisCache[K comparable, V any] struct {
 
 // 创建Redis缓存
 func NewRedisCache[K comparable, V any](
-// redisClient redis.Client,
+	// redisClient redis.Client,
 	marshal func(V) ([]byte, error),
 	unmarshal func([]byte) (V, error),
 ) *RedisCache[K, V] {
