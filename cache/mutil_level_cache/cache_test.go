@@ -2,6 +2,7 @@ package mutil_level_cache
 
 import (
 	"comprehensive-study/cache/safemap"
+	"comprehensive-study/cache/yz/yz_v2"
 	"github.com/bluele/gcache"
 	"github.com/dgraph-io/ristretto/v2"
 	"log/slog"
@@ -388,6 +389,56 @@ func TestCacheBatchOperations(t *testing.T) {
 			t.Errorf("批量获取值错误: key=%s", key)
 		}
 	}
+}
+
+func TestCacheConcurrentSet(t *testing.T) {
+	// 创建缓存配置
+	config := &yz_v2.CacheConfig[yz_v2.StringKey, int]{
+		MaxSize:         1000,
+		MaxMemory:       100 * 1024 * 1024, // 100MB
+		DefaultTTL:      time.Hour,
+		CleanupInterval: time.Minute * 5,
+		ShardCount:      16,
+		EvictPolicy:     yz_v2.LRU,
+		EnableMetrics:   true,
+		AccessThreshold: 5,           // 5次访问
+		AccessWindow:    time.Minute, // 1分钟内
+		OnEvicted: func(key yz_v2.StringKey, value int, reason yz_v2.EvictionReason) {
+			//slog.Info("OnEvicted", slog.Any("key", key), slog.Any("value", value), slog.Any("reason", reason.String()))
+		},
+	}
+	// 创建缓存实例
+	cache := yz_v2.NewMultiLevelCache[yz_v2.StringKey, int](config)
+	defer cache.Close()
+	var wg sync.WaitGroup
+	goroutines := 100
+	operations := 100000
+
+	wg.Add(goroutines)
+	for i := 0; i < goroutines; i++ {
+		go func(id int) {
+			defer wg.Done()
+			for j := 0; j < operations; j++ {
+				key := yz_v2.StringKey("key" + string(rune(id)))
+				value := id*1000 + j
+
+				// 并发写入
+				cache.Set(key, value, time.Minute)
+
+				// 并发读取
+				if v, found := cache.Get(key); found {
+					if v != value {
+						t.Errorf("并发读取错误: 期望 %d, 得到 %d", value, v)
+					}
+				}
+
+				// 并发删除
+				cache.Delete(key)
+			}
+		}(i)
+	}
+
+	wg.Wait()
 }
 
 // 并发删除测试

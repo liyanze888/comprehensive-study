@@ -31,13 +31,14 @@ func NewUserCharacterInteraction(worker *TypeSenseWorker) *UserCharacterInteract
 }
 
 func (u *UserCharacterInteraction) DoWork() {
-	u.worker.DeleteIndex(UserInteraction)
-	u.worker.DeleteIndex(CharacterIndex)
-	u.CreateCharacterIndex()
-	u.CreateUserFavoriteCharacterIndex()
-	u.AddDataToCharacterIndex()
-	u.AddDataToUserFavorite()
-	u.SearchCharacter()
+	//u.worker.DeleteIndex(UserInteraction)
+	//u.worker.DeleteIndex(CharacterIndex)
+	//u.CreateCharacterIndex()
+	//u.CreateUserFavoriteCharacterIndex()
+	//u.AddDataToCharacterIndex()
+	//u.AddDataToUserFavorite()
+	//u.SearchCharacter()
+	u.TestAddUserFavoriteToList()
 }
 
 type (
@@ -112,7 +113,7 @@ func (u *UserCharacterInteraction) CreateUserFavoriteCharacterIndex() {
 			Name: "character_name", Type: "string", Index: pointer.True(), Infix: pointer.True(),
 		},
 		{
-			Name: "interaction", Type: "[]int64", Index: pointer.True(), Facet: pointer.True(), //分切面
+			Name: "interaction", Type: "int64[]", Index: pointer.True(), Facet: pointer.True(), //分切面
 		},
 	}
 	createIndexRequest := &api.CollectionSchema{
@@ -122,6 +123,21 @@ func (u *UserCharacterInteraction) CreateUserFavoriteCharacterIndex() {
 	}
 	u.worker.CreateIndex(createIndexRequest)
 	return
+}
+
+func (u *UserCharacterInteraction) TestAddUserFavoriteToList() {
+	params := map[string]interface{}{
+		"id": "1",
+		"interaction": map[string]interface{}{
+			"add": []int64{3, 4},
+		},
+	}
+	marshal, err := json.Marshal(params)
+	if err != nil {
+		panic(err)
+	}
+	slog.Info("AddDataToUserFavorite log", slog.Any("marshal", string(marshal)))
+	u.worker.UpdateData(UserInteraction, string(marshal))
 }
 
 func (u *UserCharacterInteraction) AddDataToUserFavorite() {

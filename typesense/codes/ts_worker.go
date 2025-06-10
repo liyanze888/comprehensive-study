@@ -53,6 +53,7 @@ func (t *TypeSenseWorker) CreateIndex(schema *api.CollectionSchema) {
 		}
 		return
 	}
+	slog.Info("CreateIndex", slog.Any("schema", schema), slog.Any("resp", response))
 }
 
 func (t *TypeSenseWorker) UpdateData(indexName, content string) {
